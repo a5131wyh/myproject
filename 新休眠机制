@@ -1,0 +1,37 @@
+
+autosleep_store
+	-->pm_autosleep_set_state(suspend_state_t state)
+		1.__pm_stay_awake(autosleep_ws)    
+			autosleep_ws这个变量由main.c中的pm_autosleep_init()，autosleep_ws = wakeup_source_register("autosleep")建立一个名字为autosleep的wakeup_source
+			wakeup_source_report_event(ws)
+					ws->event_count++
+					wakeup_source_activate(ws)
+						cec = atomic_inc_return(&combined_event_count)
+						trace_wakeup_source_activate(ws->name, cec)
+		2.全局变量 autosleep_state = state  
+		3.__pm_relax(autosleep_ws)
+			wakeup_source_deactivate(ws);
+
+ 		4.pm_wakep_autosleep_enabled(true)
+		5.queue_up_suspend_work()
+			try_to_suspend
+
+
+linux社区没有接受android相关wakelock的patch，原因：1，用户空间和内核空间都可以操纵wakelock，这样相当于用户空间直接操作内核空间的对象，破坏了用户空间和内核空间的独立性。2，拥有wakelock就不能进入睡眠，第三方的应用如果使用不好wakelock，将会对电池的续航造成很大影响。
+
+linux睡眠流程
+linux的内核在处理省电方式上有两个模型，一个是system suspend，一个是pm runtime syspend。system suspend关注到整个系统层面的省电，即S状态；pm runtime syspend关注到设备的省电，即D状态。linux论坛曾有人认为将cpuidle和pm runtime合并起来可以替换system suspend，也有人认为应该将pm runtime和system suspend两个在内核中都使用。
+2009年android的第一版代码基于的内核在2.6.27之前，这时候runtime PM还没有开发的很好，而且支持的硬件也比较少，目前有很多硬件设备支持了，比如USB子系统，PCI子系统，SCSI子系统，I2C子系统，MMC子系统，串口设备，MISC设备等等。
+linux内核为了撇弃wakelock，在内核中加入了唤醒事件框架。这个框架主要定义个两个计数器：event_count处理完的唤醒事件的计数，event_in_process数据正在被处理的唤醒事件的计数。提供的相关接口如下：
+pm_stay_awake：增加event_in_process计数，带有一个设备指针参数用来更新power.wakeup_count,在sysfs中，位置在/sys/devices/.../power/wakeup_count
+大致对应于wakelock的锁定
+pm_relax:减少event_in_process计数，同时增加event_count计数。去除pm_wakeup_event设置的定时器
+大致对应于wakelock的解锁
+pm_wakeup_event：增加event_in_process计数，同时建立一个定时器来减少event_in_process计数和增加event_count计数。第一个设备指针参数用来更新设备power.wakeup_count，第二个参数是减少event_in_process计数前等待的毫秒数。为设备对象上报唤醒事件。 大致对应pm_stay_awake加一个计时器在不久后做pm_relax动作
+event_count计数的当前值，可以从/sys/power/wakeup_count来读取。写入event_count计数的值，将会保存在saved_count这个变量里。但是，写入成功的条件是写入的值必须和event_count的值相等。写入过程中，events_check_enabled被设置，它将告诉PM core在睡眠流程中使用event_in_process计数和event_count计数。PM core在睡眠流程中会调用pm_wakeup_pending来检查目前的计数。
+在后来的改动中，引入了一个结构wakeup_source来表示能产生唤醒事件的实体。
+device_set_wakeup_enable():第二个参数设置为true，唤醒源设备对象被创建并加入系统唤醒源的列表上。wakeup_source保存在设备的power.wakeup_source中。第二个参数设置为false，销毁唤醒源设备。
+wakeup_source_create()：创建唤醒源设备
+wakeup_source_add()：将唤醒源设备加入全局的唤醒源设备列表
+wakeup_source_register():实现wakeup_source_create()和wakeup_source_add()
+如果/sys/power/wakeup_count使用正确，内核就就可以根据唤醒源的值决定是放弃失眠还是进行睡眠。用户空间不能使用唤醒源，这样用户空间允许使用wakelock。
